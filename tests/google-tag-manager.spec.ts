@@ -1,0 +1,238 @@
+import { test, expect } from '@playwright/test'
+import { testConfig } from './test.config'
+
+/**
+ * Google Tag Manager (GTM) Tests
+ *
+ * These tests verify that Google Tag Manager is properly integrated:
+ * 1. GTM script is loaded (via Next.js Script lazyOnload strategy)
+ * 2. dataLayer is initialized
+ * 3. GTM noscript fallback exists in body
+ * 4. GTM ID is configured in the component
+ *
+ * Note: The GTM script uses strategy="lazyOnload", which defers loading until
+ * after the browser's onload event. Tests must wait for the script to appear.
+ */
+
+/** Helper: wait for the GTM script element to be injected by Next.js */
+async function waitForGtmScript(page: import('@playwright/test').Page) {
+  await page.waitForFunction(() => document.querySelector('script[id="gtm-script"]') !== null, {
+    timeout: 15000,
+  })
+}
+
+/** Helper: wait for dataLayer to be initialized */
+async function waitForDataLayer(page: import('@playwright/test').Page) {
+  await page.waitForFunction(
+    () => typeof window.dataLayer !== 'undefined' && Array.isArray(window.dataLayer),
+    { timeout: 15000 }
+  )
+}
+
+/**
+ * Skips a test that needs the GTM tag itself. GTM_ID is empty until the
+ * charity's own container is provisioned (workflows 505/503), and the
+ * components then correctly render no tag, so there is nothing to wait for.
+ * The dataLayer / consent tests below still run: they do not need a container.
+ */
+function skipWithoutContainer() {
+  test.skip(
+    !testConfig.googleTagManager.configured,
+    'GTM_ID is empty: no container provisioned for this site yet'
+  )
+}
+
+test.describe('Google Tag Manager Integration', () => {
+  test('should initialize dataLayer on page load', async ({ page }) => {
+    await page.goto('/')
+    await waitForDataLayer(page)
+
+    const hasDataLayer = await page.evaluate(() => {
+      return typeof window.dataLayer !== 'undefined' && Array.isArray(window.dataLayer)
+    })
+
+    expect(hasDataLayer).toBe(true)
+  })
+
+  test('should load GTM script with correct ID', async ({ page }) => {
+    skipWithoutContainer()
+    await page.goto('/')
+    await waitForGtmScript(page)
+
+    const gtmScript = await page.locator('script[id="gtm-script"]').count()
+    expect(gtmScript).toBeGreaterThan(0)
+
+    const scriptContent = await page.locator('script[id="gtm-script"]').innerHTML()
+    expect(scriptContent).toContain('googletagmanager.com/gtm.js')
+    expect(scriptContent).toContain('dataLayer')
+  })
+
+  test('must NOT ship a GTM noscript fallback', async ({ page }) => {
+    await page.goto('/')
+
+    // Inverted deliberately. This test used to assert the iframe was present.
+    //
+    // The <noscript> iframe is the one tracking path consent cannot reach:
+    // with JavaScript disabled the consent bootstrap never runs, the banner
+    // never renders, and the footer's "Do Not Sell or Share" control does not
+    // exist — but the iframe would still request the GTM container, carrying
+    // no consent signal, with no way for a GPC-sending visitor to stop it.
+    //
+    // Asserted by ABSENCE because re-adding it is a one-line edit that any
+    // presence-only suite would wave through, and the privacy policy's claim
+    // that the consent check runs before any Google tag loads would silently
+    // become false again.
+    //
+    // And deliberately NOT behind `skipWithoutContainer()`, which `main`'s
+    // presence version carried: the iframe must be absent whether or not a
+    // container is provisioned, so skipping on an unconfigured fork would
+    // retire the check on exactly the sites most likely to be re-provisioned
+    // from the template.
+    const pageContent = await page.content()
+    expect(pageContent).not.toContain('googletagmanager.com/ns.html')
+  })
+
+  test('should push events to dataLayer', async ({ page }) => {
+    await page.goto('/')
+    await waitForDataLayer(page)
+
+    const canPushToDataLayer = await page.evaluate(() => {
+      if (typeof window.dataLayer === 'undefined') return false
+
+      const initialLength = window.dataLayer.length
+      window.dataLayer.push({ event: 'test_event', test: true })
+      return window.dataLayer.length > initialLength
+    })
+
+    expect(canPushToDataLayer).toBe(true)
+  })
+
+  test('should load GTM script after page interaction', async ({ page }) => {
+    skipWithoutContainer()
+    await page.goto('/')
+    await waitForGtmScript(page)
+
+    const gtmScript = await page.evaluate(() => {
+      const script = document.querySelector('script[id="gtm-script"]')
+      return script !== null
+    })
+
+    expect(gtmScript).toBe(true)
+
+    await waitForDataLayer(page)
+
+    const dataLayerInitialized = await page.evaluate(() => {
+      return typeof window.dataLayer !== 'undefined'
+    })
+
+    expect(dataLayerInitialized).toBe(true)
+  })
+
+  test('should emit Google Consent Mode defaults before GTM starts', async ({ page }) => {
+    skipWithoutContainer()
+    await page.goto('/')
+    await waitForGtmScript(page)
+    await waitForDataLayer(page)
+    // Wait for the GTM inline snippet to have actually executed.
+    await page.waitForFunction(
+      () => (window.dataLayer || []).some((e) => e && typeof e === 'object' && 'gtm.start' in e),
+      { timeout: 15000 }
+    )
+
+    const order = await page.evaluate(() => {
+      // The inline bootstrap script is server-rendered in <head>.
+      const bootstrap = document.querySelector('script#consent-mode-default')
+      // Entries are heterogeneous: gtag() pushes `arguments` objects
+      // (array-like, numeric keys), GTM pushes plain objects — so type as
+      // unknown[] and cast only where indexed.
+      const dl = (window.dataLayer || []) as unknown[]
+      // gtag('consent','default',…) pushes an arguments object: [0]='consent', [1]='default'.
+      const consentDefaultIdx = dl.findIndex((e) => {
+        const args = e as Record<number, unknown> | null | undefined
+        return !!args && args[0] === 'consent' && args[1] === 'default'
+      })
+      const gtmStartIdx = dl.findIndex(
+        (e) => !!e && typeof e === 'object' && 'gtm.start' in (e as object)
+      )
+      return {
+        hasBootstrap: bootstrap !== null,
+        bootstrapContent: bootstrap?.textContent ?? '',
+        consentDefaultIdx,
+        gtmStartIdx,
+      }
+    })
+
+    expect(order.hasBootstrap).toBe(true)
+    // TWO defaults: a region-scoped denial for the EEA/UK/CH, then an unscoped
+    // default for everyone else. Google resolves the most specific matching
+    // region, so order does not decide the outcome -- specificity does.
+    //
+    // This assertion has now inverted twice, which is worth stating plainly:
+    // it first required the region array, then required its ABSENCE under the
+    // global model, and now requires it again. The thing worth asserting was
+    // never the presence or absence of a key but WHICH visitors a denial
+    // reaches, so it is checked from both sides below.
+    expect(order.bootstrapContent).toContain("'region'")
+    expect(order.bootstrapContent).toContain('"GB"')
+    expect(order.bootstrapContent).toContain('"CH"')
+    expect(order.bootstrapContent).toContain("'analytics_storage': 'denied'")
+    expect(order.bootstrapContent).toContain("'analytics_storage': 'granted'")
+    // The GPC / stored-opt-out read has to reach the page: a bootstrap that
+    // lost it would still satisfy every assertion above.
+    expect(order.bootstrapContent).toContain('globalPrivacyControl')
+    // And personalised advertising stays off by default. Ad Grants is
+    // search-only, so granting it would buy nothing and carry the most legal
+    // weight of any signal here.
+    expect(order.bootstrapContent).toContain("'ad_personalization': 'denied'")
+    // functionality_storage and security_storage stay granted: neither carries
+    // measurement, and a site that cannot remember a consent choice cannot
+    // honour one.
+    expect(order.bootstrapContent).toContain("'functionality_storage': 'granted'")
+    expect(order.bootstrapContent).toContain("'security_storage': 'granted'")
+    // The consent defaults must land in the dataLayer before GTM's own
+    // gtm.start entry — i.e. before any Google tag begins executing.
+    expect(order.consentDefaultIdx).toBeGreaterThanOrEqual(0)
+    expect(order.gtmStartIdx).toBeGreaterThanOrEqual(0)
+    expect(order.consentDefaultIdx).toBeLessThan(order.gtmStartIdx)
+  })
+
+  test('should work with cookie consent system', async ({ page, context }) => {
+    // Clear cookies and localStorage
+    await context.clearCookies()
+    await page.goto('/')
+    await page.evaluate(() => localStorage.clear())
+    await page.reload()
+
+    // Wait for cookie banner (client-side hydration)
+    const banner = page.locator('[role="region"][aria-label="Cookie consent notice"]')
+    await expect(banner).toBeVisible({ timeout: 15000 })
+
+    // Accept all cookies
+    await page.getByRole('button', { name: 'Accept All' }).click()
+
+    // Wait for dataLayer to be available (consent_update event is pushed synchronously)
+    await waitForDataLayer(page)
+
+    const hasConsentEvent = await page.evaluate(() => {
+      if (typeof window.dataLayer === 'undefined') return false
+
+      return window.dataLayer.some((item: { event?: string }) => item.event === 'consent_update')
+    })
+
+    expect(hasConsentEvent).toBe(true)
+  })
+})
+
+test.describe('Google Tag Manager Configuration', () => {
+  test('should load GTM script with configured ID', async ({ page }) => {
+    skipWithoutContainer()
+    await page.goto('/')
+    await waitForGtmScript(page)
+
+    const gtmScript = await page.locator('script[id="gtm-script"]').count()
+    expect(gtmScript).toBeGreaterThan(0)
+
+    const scriptContent = await page.locator('script[id="gtm-script"]').innerHTML()
+    expect(scriptContent).toContain(testConfig.googleTagManager.id)
+  })
+})

@@ -1,0 +1,61 @@
+name: OpenSSF Scorecard
+
+# Runs the OpenSSF Scorecard on a weekly cadence and on pushes to main.
+# Results are uploaded to GitHub code scanning (Security tab) so that
+# regressions in supply-chain posture are visible alongside CodeQL findings,
+# and published to the OpenSSF Scorecard API for the public badge.
+#
+# Docs: https://github.com/ossf/scorecard-action
+
+on:
+  branch_protection_rule:
+    types: [created, edited, deleted]
+  schedule:
+    - cron: '23 4 * * 1' # weekly, Monday 04:23 UTC
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      # publish_results: OIDC token proves to the OpenSSF API that this
+      # workflow, on this repo's default branch, produced the results.
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          # Publish to the public OpenSSF API so the README badge and
+          # https://scorecard.dev/viewer/?uri=github.com/FreeForCharity/FFC-IN-Footer_Only_Template
+          # show a live score (FreeForCharity/FFC-Cloudflare-Automation#1582).
+          publish_results: true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          retention-days: 7
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          sarif_file: scorecard-results.sarif
