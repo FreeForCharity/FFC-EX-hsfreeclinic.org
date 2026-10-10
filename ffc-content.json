@@ -1,0 +1,25 @@
+{
+  "domain": "hsfreeclinic.org",
+  "charityName": "",
+  "websiteSituation": "",
+  "currentWebsiteUrl": "",
+  "domainRegistrar": "",
+  "requesterGitHubUsername": "clarkemoyer",
+  "technicalPocGitHubUsername": "",
+  "cloudflareZoneControlled": false,
+  "footer": {
+    "email": "",
+    "phone": "",
+    "address": "",
+    "ein": "",
+    "irsStatus": "",
+    "guideStarProfileUrl": "",
+    "guideStarDirectProfileUrl": "",
+    "socialLinks": [],
+    "mission": "",
+    "donationUrl": "",
+    "volunteerUrl": ""
+  },
+  "leadership": [],
+  "generatedUtc": "2026-10-10T23:38:52.1736083Z"
+}
